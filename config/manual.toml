@@ -1,0 +1,13 @@
+# Entries found by hand for Ratatouille's default.xbe, included by game.toml so xbe_symbols can rewrite that one
+
+# extra entry points
+[functions]
+# callbacks of the table built on the stack at 0x5E0C5..0x5E62x and called through it at 0x5DFC5; a gap fill decode
+# overlapped their first bytes, so the immediate pass skipped them ("indirect call to 00050FE0 has no recompiled function")
+0x40650 = ""
+0x50FE0 = ""
+
+[symbols]
+# not in the 5849 signatures: reads the report page at CDevice +0x7D4, returns D3DERR_TESTINCOMPLETE 0x88760828 while
+# pending; the loading screen polls it at 0x216400 without presenting, so the host completes the test when polled
+D3DDevice_GetVisibilityTestResult = 0x2CA5A0
