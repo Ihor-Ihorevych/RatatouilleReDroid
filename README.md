@@ -10,7 +10,7 @@ An unofficial native PC port of the original Xbox version of Ratatouille (2007),
 
 ## Status
 
-Early. It boots, gets through the loading screens and plays the first level with a controller. Known issue: a grey wedge shows near Remy as the camera turns. There are no release builds yet.
+Fully playable. The game has been finished at 100% completion on PC, with everything working normally. There are no release builds yet.
 
 ## Building
 
