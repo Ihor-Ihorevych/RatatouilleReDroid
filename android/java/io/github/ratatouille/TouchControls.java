@@ -1,0 +1,485 @@
+package io.github.ratatouille;
+
+import android.app.AlertDialog;
+import android.content.Context;
+import android.content.SharedPreferences;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.RectF;
+import android.hardware.input.InputManager;
+import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.DisplayCutout;
+import android.view.InputDevice;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.WindowInsets;
+import android.widget.LinearLayout;
+import android.widget.SeekBar;
+import android.widget.TextView;
+
+/**
+ * The game's controls on the screen, one button per action it binds (its input/input.XBO), each drawn as an icon from
+ * SVG path data: Jump (A), Action (B and X: attack, drop, use, move an object), HUD (Y), Sprint (right trigger), Sniff
+ * (left trigger), Select and Start, and a camera reset (right stick click). There are no sticks on the screen until a
+ * finger lands: a touch on the left half moves (left stick), a touch on the right half turns the camera (right stick),
+ * each stick centred where the finger came down. A button at the top left opens the settings (the resolution).
+ * Every finger is tracked on its own, and one that slides from a button to another presses the one under it.
+ * The state goes to the game's input code through nativeSetPad. Hidden while a physical gamepad is connected.
+ */
+public class TouchControls extends View implements InputManager.InputDeviceListener {
+    static native void nativeSetPad(int buttons, int a, int b, int x, int y, int black, int white, int lt, int rt,
+                                    int lx, int ly, int rx, int ry);
+
+    // the console controller's button bits, as input::Pad::buttons
+    private static final int START = 16, BACK = 32, R3 = 128;
+    // input::Pad::analog indices
+    private static final int A = 0, B = 1, X = 2, Y = 3, BLACK = 4, WHITE = 5, LT = 6, RT = 7;
+
+    // ---- icons: SVG path data in a 24 x 24 box ------------------------------------------------------------------
+
+    /** An icon: a filled path and/or a stroked one. */
+    private static final class Icon {
+        final Path fill, stroke;
+        final boolean evenOdd;
+        final float strokeWidth;
+        Icon(String fillData, String strokeData, float strokeWidth, boolean evenOdd) {
+            this.fill = fillData == null ? null : SvgPath.parse(fillData);
+            this.stroke = strokeData == null ? null : SvgPath.parse(strokeData);
+            this.strokeWidth = strokeWidth;
+            this.evenOdd = evenOdd;
+            if (fill != null && evenOdd) fill.setFillType(Path.FillType.EVEN_ODD);
+        }
+    }
+
+    private static Icon filled(String d) { return new Icon(d, null, 0, false); }
+
+    // an up arrow
+    private static final String JUMP = "M12 3 L20 12 H15 V20 H9 V12 H4 Z";
+    // a paw: the pad and four toes
+    private static final String ACTION =
+        "M12 12.5 C8.5 12.5 6 15.2 6 17.6 C6 19.6 7.6 20.5 9.4 20.5 C10.4 20.5 11.2 20.1 12 20.1 "
+        + "C12.8 20.1 13.6 20.5 14.6 20.5 C16.4 20.5 18 19.6 18 17.6 C18 15.2 15.5 12.5 12 12.5 Z "
+        + SvgPath.circle(5.5f, 10.5f, 2.0f) + SvgPath.circle(9.0f, 6.5f, 2.1f) + SvgPath.circle(15.0f, 6.5f, 2.1f)
+        + SvgPath.circle(18.5f, 10.5f, 2.0f);
+    // a screen with lines of text in it
+    private static final String HUD =
+        "M3 5 H21 V19 H3 Z M5.5 7.5 V16.5 H18.5 V7.5 Z M7.5 10 H13 V11.8 H7.5 Z M7.5 13.2 H16 V15 H7.5 Z";
+    // two chevrons: fast forward
+    private static final String SPRINT =
+        "M4 5 L11 12 L4 19 L7 19 L14 12 L7 5 Z M11 5 L18 12 L11 19 L14 19 L21 12 L14 5 Z";
+    // three waves: a scent
+    private static final String SNIFF =
+        wave(7) + wave(12) + wave(17);
+    // a list: the mission briefing
+    private static final String SELECT =
+        "M4 6 H6.5 V8.5 H4 Z M9 6 H20 V8.5 H9 Z M4 10.75 H6.5 V13.25 H4 Z M9 10.75 H20 V13.25 H9 Z "
+        + "M4 15.5 H6.5 V18 H4 Z M9 15.5 H20 V18 H9 Z";
+    // a play triangle: start
+    private static final String START_ICON = "M7 4.5 V19.5 L19.5 12 Z";
+    // crosshair: centre the camera
+    private static final String CAMERA_STROKE =
+        "M12 2.5 V6.5 M12 17.5 V21.5 M2.5 12 H6.5 M17.5 12 H21.5 " + SvgPath.circle(12, 12, 5.2f);
+    private static final String CAMERA_FILL = SvgPath.circle(12, 12, 1.6f);
+    // sliders: the settings
+    private static final String SETTINGS_STROKE = "M3.5 7 H20.5 M3.5 12 H20.5 M3.5 17 H20.5";
+    private static final String SETTINGS_FILL =
+        SvgPath.circle(9, 7, 2.4f) + SvgPath.circle(15, 12, 2.4f) + SvgPath.circle(8, 17, 2.4f);
+
+    private static String wave(float y) {
+        return "M3 " + y + " Q5.25 " + (y - 3.5f) + " 7.5 " + y + " Q9.75 " + (y + 3.5f) + " 12 " + y + " Q14.25 "
+            + (y - 3.5f) + " 16.5 " + y + " Q18.75 " + (y + 3.5f) + " 21 " + y + " ";
+    }
+
+    // ---- controls -----------------------------------------------------------------------------------------------
+
+    private static final class Control {
+        final int bit;     // button bit, 0 for an analog button
+        final int analog;  // analog index, -1 for a digital button
+        int analog2 = -1;  // a second analog button pressed with it
+        final int color;
+        final Icon icon;
+        float cx, cy, rx, ry;  // an ellipse (a circle when rx == ry), or a box
+        boolean round = true;
+        int finger = -1;
+        Control(int bit, int analog, int color, Icon icon) {
+            this.bit = bit;
+            this.analog = analog;
+            this.color = color;
+            this.icon = icon;
+        }
+        boolean hit(float x, float y, float slop) {
+            if (round) {
+                float dx = (x - cx) / (rx * slop), dy = (y - cy) / (ry * slop);
+                return dx * dx + dy * dy <= 1;
+            }
+            return Math.abs(x - cx) <= rx * slop && Math.abs(y - cy) <= ry * slop;
+        }
+    }
+
+    /** A stick that exists while a finger is down: centred where it landed. */
+    private static final class Stick {
+        float cx, cy, kx, ky;
+        int finger = -1;
+    }
+
+    private final Control jump = new Control(0, A, 0xFF4CAF50, filled(JUMP));
+    // one button for what the game binds to B (attack, drop and swing) and to X (use, move an object): both are sent
+    private final Control attack = new Control(0, B, 0xFFE53935, filled(ACTION));
+    private final Control hud = new Control(0, Y, 0xFFFDD835, new Icon(HUD, null, 0, true));
+    // the game's R and L are the triggers or the Black and White buttons: each button sends both, the other pair is unused
+    private final Control sprint = new Control(0, RT, 0xFFFF9800, filled(SPRINT));
+    private final Control sniff = new Control(0, LT, 0xFFAB47BC, new Icon(null, SNIFF, 2.0f, false));
+    private final Control select = new Control(BACK, -1, 0xFFBDBDBD, filled(SELECT));
+    private final Control start = new Control(START, -1, 0xFFBDBDBD, filled(START_ICON));
+    private final Control camera = new Control(R3, -1, 0xFFBDBDBD, new Icon(CAMERA_FILL, CAMERA_STROKE, 1.8f, false));
+    // opens the settings panel, never sent to the game
+    private final Control settings = new Control(0, -1, 0xFF90A4AE, new Icon(SETTINGS_FILL, SETTINGS_STROKE, 1.8f, false));
+    private final Control[] controls = {jump, attack, hud, sprint, sniff, select, start, camera, settings};
+
+    private final Stick left = new Stick(), right = new Stick();
+    private float stickRadius;
+    private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG), stroke = new Paint(Paint.ANTI_ALIAS_FLAG),
+        iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF rect = new RectF();
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private boolean padPresent;
+
+    public TouchControls(Context context) {
+        super(context);
+        attack.analog2 = X;
+        sprint.analog2 = BLACK;
+        sniff.analog2 = WHITE;
+        stroke.setStyle(Paint.Style.STROKE);
+        iconPaint.setStrokeCap(Paint.Cap.ROUND);
+        iconPaint.setStrokeJoin(Paint.Join.ROUND);
+        setFocusable(false);
+        setFocusableInTouchMode(false);
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        InputManager im = (InputManager) getContext().getSystemService(Context.INPUT_SERVICE);
+        im.registerInputDeviceListener(this, handler);
+        refreshPad();
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        InputManager im = (InputManager) getContext().getSystemService(Context.INPUT_SERVICE);
+        im.unregisterInputDeviceListener(this);
+        super.onDetachedFromWindow();
+    }
+
+    @Override public void onInputDeviceAdded(int id) { refreshPad(); }
+    @Override public void onInputDeviceRemoved(int id) { refreshPad(); }
+    @Override public void onInputDeviceChanged(int id) { refreshPad(); }
+
+    /** A physical gamepad takes over: the overlay goes away and the touches reach the game's own surface. */
+    private void refreshPad() {
+        boolean present = false;
+        for (int id : InputDevice.getDeviceIds()) {
+            InputDevice d = InputDevice.getDevice(id);
+            if (d != null && !d.isVirtual() && (d.getSources() & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD)
+                present = true;
+        }
+        padPresent = present;
+        setVisibility(present ? View.GONE : View.VISIBLE);
+        if (present) release();
+    }
+
+    @Override
+    protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        layoutControls();
+    }
+
+    /** The cutout (a camera in the side of the screen) is found after the view is attached: the controls move again. */
+    @Override
+    public WindowInsets onApplyWindowInsets(WindowInsets insets) {
+        layoutControls();
+        invalidate();
+        return super.onApplyWindowInsets(insets);
+    }
+
+    private void layoutControls() {
+        final int h = getHeight();
+        if (h == 0) return;
+        final float u = h / 100f;  // a hundredth of the height
+        // controls start inside the cutout, and a little in from the edge
+        float inset = 0, insetLeft = 0;
+        if (Build.VERSION.SDK_INT >= 28) {
+            WindowInsets wi = getRootWindowInsets();
+            DisplayCutout dc = wi == null ? null : wi.getDisplayCutout();
+            if (dc != null) {
+                inset = dc.getSafeInsetRight();
+                insetLeft = dc.getSafeInsetLeft();
+            }
+        }
+        final float w = getWidth() - inset;
+        stickRadius = 16 * u;
+        // top left: the settings
+        box(settings, insetLeft + 9 * u, 8 * u, 6 * u, 5 * u);
+        // top right: Select and Start
+        box(select, w - 28 * u, 8 * u, 6 * u, 5 * u);
+        box(start, w - 14 * u, 8 * u, 6 * u, 5 * u);
+        // under them: sniff
+        box(sniff, w - 14 * u, 23 * u, 7 * u, 6 * u);
+        // bottom right, within reach of the thumb: Jump lowest, the action button above it, Sprint beside it
+        place(jump, w - 14 * u, 83 * u, 9 * u);
+        place(attack, w - 14 * u, 60 * u, 8.5f * u);
+        place(sprint, w - 33 * u, 77 * u, 8.5f * u);
+        place(hud, w - 33 * u, 54 * u, 5.5f * u);
+        place(camera, w - 51 * u, 90 * u, 5 * u);
+    }
+
+    private static void place(Control c, float cx, float cy, float r) {
+        c.cx = cx; c.cy = cy; c.rx = r; c.ry = r; c.round = true;
+    }
+
+    private static void box(Control c, float cx, float cy, float hw, float hh) {
+        c.cx = cx; c.cy = cy; c.rx = hw; c.ry = hh; c.round = false;
+    }
+
+    // ---- touch --------------------------------------------------------------------------------------------------
+
+    @Override
+    public boolean onTouchEvent(MotionEvent e) {
+        if (padPresent) return false;
+        final int action = e.getActionMasked();
+        final int index = e.getActionIndex();
+        switch (action) {
+            case MotionEvent.ACTION_DOWN:
+            case MotionEvent.ACTION_POINTER_DOWN:
+                down(e.getPointerId(index), e.getX(index), e.getY(index));
+                break;
+            case MotionEvent.ACTION_MOVE:
+                for (int i = 0; i < e.getPointerCount(); i++) move(e.getPointerId(i), e.getX(i), e.getY(i));
+                break;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_POINTER_UP:
+                up(e.getPointerId(index));
+                break;
+            case MotionEvent.ACTION_CANCEL:
+                release();
+                break;
+        }
+        send();
+        invalidate();
+        return true;
+    }
+
+    private void down(int id, float x, float y) {
+        Control c = controlAt(x, y);
+        if (c == settings) {
+            handler.post(this::showSettings);
+            return;
+        }
+        if (c != null) {
+            if (c.finger < 0) c.finger = id;
+            return;
+        }
+        // not on a button: the left half moves, the right half looks
+        Stick s = x < getWidth() / 2f ? left : right;
+        if (s.finger < 0) {
+            s.finger = id;
+            s.cx = x;
+            s.cy = y;
+            s.kx = s.ky = 0;
+        }
+    }
+
+    private void move(int id, float x, float y) {
+        for (Stick s : new Stick[] {left, right}) if (s.finger == id) moveStick(s, x, y);
+        // a finger sliding over the buttons presses the one under it
+        for (Control c : controls) {
+            if (c.finger != id) continue;
+            if (!c.hit(x, y, 1.15f)) {
+                c.finger = -1;
+                Control n = controlAt(x, y);
+                if (n != null && n != settings && n.finger < 0) n.finger = id;
+            }
+        }
+    }
+
+    private void up(int id) {
+        for (Stick s : new Stick[] {left, right}) {
+            if (s.finger == id) {
+                s.finger = -1;
+                s.kx = s.ky = 0;
+            }
+        }
+        for (Control c : controls) if (c.finger == id) c.finger = -1;
+    }
+
+    private void release() {
+        for (Stick s : new Stick[] {left, right}) {
+            s.finger = -1;
+            s.kx = s.ky = 0;
+        }
+        for (Control c : controls) c.finger = -1;
+        send();
+        invalidate();
+    }
+
+    private Control controlAt(float x, float y) {
+        Control best = null;
+        float bestDistance = Float.MAX_VALUE;
+        for (Control c : controls) {
+            if (!c.hit(x, y, 1.15f)) continue;
+            float d = (x - c.cx) * (x - c.cx) + (y - c.cy) * (y - c.cy);
+            if (d < bestDistance) {
+                bestDistance = d;
+                best = c;
+            }
+        }
+        return best;
+    }
+
+    private void moveStick(Stick s, float x, float y) {
+        float dx = x - s.cx, dy = y - s.cy;
+        float len = (float) Math.sqrt(dx * dx + dy * dy);
+        if (len > stickRadius) {
+            dx *= stickRadius / len;
+            dy *= stickRadius / len;
+        }
+        s.kx = dx;
+        s.ky = dy;
+    }
+
+    // ---- settings -----------------------------------------------------------------------------------------------
+
+    private static final int MIN_PERCENT = 25, STEP = 5, MAX_PERCENT = 100;
+
+    /** A resolution in pixels on this screen: the picture fills the screen at 100%. */
+    private String describe(int percent) {
+        return percent + "%  (" + Math.round(getWidth() * percent / 100f) + " x "
+            + Math.round(getHeight() * percent / 100f) + ")";
+    }
+
+    private void showSettings() {
+        final Context ctx = getContext();
+        final SharedPreferences prefs = ctx.getSharedPreferences(GameActivity.PREFS, Context.MODE_PRIVATE);
+        final int current = prefs.getInt(GameActivity.RESOLUTION, 100);
+        final int pad = Math.round(20 * getResources().getDisplayMetrics().density);
+
+        LinearLayout box = new LinearLayout(ctx);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(pad, pad, pad, pad);
+        final TextView label = new TextView(ctx);
+        label.setTextSize(16);
+        label.setText("Resolution: " + describe(current));
+        box.addView(label);
+        final SeekBar bar = new SeekBar(ctx);
+        bar.setMax((MAX_PERCENT - MIN_PERCENT) / STEP);
+        bar.setProgress(Math.max(0, Math.min(bar.getMax(), (current - MIN_PERCENT) / STEP)));
+        bar.setPadding(pad, pad / 2, pad, pad / 2);
+        box.addView(bar);
+        final TextView hint = new TextView(ctx);
+        hint.setTextSize(13);
+        hint.setText("100% is the screen's own pixels. A lower resolution is faster and a little softer.");
+        box.addView(hint);
+
+        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar b, int progress, boolean fromUser) {
+                label.setText("Resolution: " + describe(MIN_PERCENT + progress * STEP));
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar b) {}
+
+            /** The targets are made again once, when the finger lifts, not at each step of the drag. */
+            @Override
+            public void onStopTrackingTouch(SeekBar b) {
+                int percent = MIN_PERCENT + b.getProgress() * STEP;
+                prefs.edit().putInt(GameActivity.RESOLUTION, percent).apply();
+                GameActivity.nativeSetResolution(percent);
+            }
+        });
+
+        new AlertDialog.Builder(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Settings")
+            .setView(box)
+            .setPositiveButton("Close", null)
+            .show();
+    }
+
+    // ---- state to the game --------------------------------------------------------------------------------------
+
+    private void send() {
+        int buttons = 0;
+        int[] analog = new int[8];
+        for (Control c : controls) {
+            if (c.finger < 0 || c == settings) continue;
+            buttons |= c.bit;
+            if (c.analog >= 0) analog[c.analog] = 255;
+            if (c.analog2 >= 0) analog[c.analog2] = 255;
+        }
+        nativeSetPad(buttons, analog[A], analog[B], analog[X], analog[Y], analog[BLACK], analog[WHITE], analog[LT],
+                     analog[RT], axis(left.kx), -axis(left.ky), axis(right.kx), -axis(right.ky));
+    }
+
+    private int axis(float v) {
+        return Math.max(-32768, Math.min(32767, Math.round(v / stickRadius * 32767f)));
+    }
+
+    // ---- drawing ------------------------------------------------------------------------------------------------
+
+    @Override
+    protected void onDraw(Canvas canvas) {
+        if (padPresent) return;
+        drawStick(canvas, left);
+        drawStick(canvas, right);
+        for (Control c : controls) drawControl(canvas, c);
+    }
+
+    /** Only while a finger holds it. */
+    private void drawStick(Canvas canvas, Stick s) {
+        if (s.finger < 0) return;
+        fill.setColor(0x22FFFFFF);
+        canvas.drawCircle(s.cx, s.cy, stickRadius, fill);
+        stroke.setColor(0x88FFFFFF);
+        stroke.setStrokeWidth(getHeight() * 0.004f);
+        canvas.drawCircle(s.cx, s.cy, stickRadius, stroke);
+        fill.setColor(0xAAFFFFFF);
+        canvas.drawCircle(s.cx + s.kx, s.cy + s.ky, stickRadius * 0.45f, fill);
+    }
+
+    private void drawControl(Canvas canvas, Control c) {
+        boolean on = c.finger >= 0;
+        int alpha = on ? 0xCC : 0x55;
+        fill.setColor((alpha << 24) | (c.color & 0xFFFFFF));
+        stroke.setColor(0xAAFFFFFF);
+        stroke.setStrokeWidth(getHeight() * 0.004f);
+        if (c.round) {
+            canvas.drawCircle(c.cx, c.cy, c.rx, fill);
+            canvas.drawCircle(c.cx, c.cy, c.rx, stroke);
+        } else {
+            rect.set(c.cx - c.rx, c.cy - c.ry, c.cx + c.rx, c.cy + c.ry);
+            float r = Math.min(c.rx, c.ry);
+            canvas.drawRoundRect(rect, r, r, fill);
+            canvas.drawRoundRect(rect, r, r, stroke);
+        }
+        // the icon: its 24 x 24 box is a bit more than the button's half height across, centred
+        final float side = Math.min(c.rx, c.ry) * 1.45f;
+        final int color = on ? 0xFF000000 : 0xF2FFFFFF;
+        canvas.save();
+        canvas.translate(c.cx - side / 2, c.cy - side / 2);
+        canvas.scale(side / 24f, side / 24f);
+        if (c.icon.fill != null) {
+            iconPaint.setStyle(Paint.Style.FILL);
+            iconPaint.setColor(color);
+            canvas.drawPath(c.icon.fill, iconPaint);
+        }
+        if (c.icon.stroke != null) {
+            iconPaint.setStyle(Paint.Style.STROKE);
+            iconPaint.setStrokeWidth(c.icon.strokeWidth);
+            iconPaint.setColor(color);
+            canvas.drawPath(c.icon.stroke, iconPaint);
+        }
+        canvas.restore();
+    }
+}

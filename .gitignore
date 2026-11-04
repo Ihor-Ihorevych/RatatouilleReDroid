@@ -38,3 +38,14 @@ settings.toml
 
 # Local temporary folder
 .local
+
+# the game itself, in any form: disc images and the files extracted from them
+*.iso
+/game_files/
+
+# fetched by CMake when absent (android/CMakeLists.txt, tools-build/CMakeLists.txt)
+/third_party/glslang/
+
+# host tools build, and the Android debug build's scratch
+/tools-build/build/
+*.apk

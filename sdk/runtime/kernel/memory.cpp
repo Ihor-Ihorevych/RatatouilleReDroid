@@ -13,6 +13,12 @@
 #include <windows.h>
 #else
 #include <sys/mman.h>
+#include <unistd.h>
+#if defined(__ANDROID__)
+#include <sys/syscall.h>
+// bionic has no memfd_create wrapper before API 30
+static int memfd_create(const char* name, unsigned flags) { return int(syscall(__NR_memfd_create, name, flags)); }
+#endif
 #endif
 
 namespace mem {

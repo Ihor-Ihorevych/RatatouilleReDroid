@@ -15,7 +15,7 @@ void Write(Level lv, const char* fmt, ...) __attribute__((format(printf, 2, 3)))
 void Flush();
 const std::string& Path();
 
-#ifdef NDEBUG
+#if defined(NDEBUG) && !defined(XBE_VERBOSE_LOG)
 inline constexpr bool kVerbose = false;
 #else
 inline constexpr bool kVerbose = true;

@@ -20,6 +20,11 @@ std::mutex g_lock;
 bool g_sdl = false;
 SDL_Gamepad* g_pads[4] = {};
 
+#ifdef __ANDROID__
+// the on-screen controls (android/java/.../TouchControls.java) as a pad of their own, set from the UI thread
+Pad g_touch;
+#endif
+
 void AddPad(SDL_JoystickID id) {
     for (SDL_Gamepad* pad : g_pads)
         if (pad && SDL_GetGamepadID(pad) == id) return;
@@ -109,9 +114,26 @@ Pad Poll(int port) {
             p.ry = int16_t(-1 - axis(SDL_GAMEPAD_AXIS_RIGHTY));
         }
     }
+#ifdef __ANDROID__
+    if (port == 0) {
+        std::lock_guard lock(g_lock);
+        p.connected = true;  // the touch screen is the player's controller when no pad is plugged in
+        p.buttons |= g_touch.buttons;
+        for (int i = 0; i < 8; i++) p.analog[i] = std::max(p.analog[i], g_touch.analog[i]);
+        if (g_touch.lx || g_touch.ly) { p.lx = g_touch.lx; p.ly = g_touch.ly; }
+        if (g_touch.rx || g_touch.ry) { p.rx = g_touch.rx; p.ry = g_touch.ry; }
+    }
+#endif
     if (app::kGame.pad) app::kGame.pad(port, p);
     return p;
 }
+
+#ifdef __ANDROID__
+void SetTouchPad(const Pad& pad) {
+    std::lock_guard lock(g_lock);
+    g_touch = pad;
+}
+#endif
 
 uint16_t HeldOnAnyController() {
     constexpr std::pair<SDL_GamepadButton, uint16_t> kFaceButtons[] = {

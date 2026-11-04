@@ -1,0 +1,182 @@
+// The Android host: SDL3's activity gives a window, the game folder is on the phone's storage, and the boot is the one
+// sdk/harness/main_test.cpp does on Linux. Replaces the SDK's app/ (which is the Windows host).
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
+#include <android/native_window.h>
+#include <jni.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "app/app.h"
+#include "core/input.h"
+#include "core/log.h"
+#include "gpu/vulkan_platform.h"
+#include "image_symbols.h"
+#include "kernel/kernel.h"
+
+namespace fs = std::filesystem;
+
+namespace app {
+
+namespace {
+SDL_Window* g_window = nullptr;
+uint32_t g_width = 1280, g_height = 720;
+}  // namespace
+
+Settings& Get() {
+    static Settings s;
+    return s;
+}
+void Load() {}
+void Save() {}
+void LogSettings() {}
+void LogSystem() {}
+void ApplyDisplay() {}
+Mode Desktop() { return {g_width, g_height}; }
+Mode Output() { return Desktop(); }
+float RenderScale(uint32_t) { return 1.0f; }
+bool Widescreen() { return true; }
+
+// the app's own folder on the shared storage: logs, the console's disk and (by default) the game
+fs::path ExeDir() {
+    static const fs::path dir = [] {
+        const char* p = SDL_GetAndroidExternalStoragePath();
+        return fs::path(p ? p : "/sdcard/Android/data/io.github.ratatouille/files");
+    }();
+    return dir;
+}
+int Instance() { return 0; }
+void* Window() { return g_window; }
+
+bool OpenSplash() { return false; }
+void SplashFirstFrame() {}
+void CloseSplash() {}
+void OpenGameWindow(bool) {}
+bool StartHandover() { return false; }
+bool HandingOver() { return false; }
+void FinishHandover() {}
+
+std::recursive_mutex& UiLock() {
+    static std::recursive_mutex m;
+    return m;
+}
+
+void Pace() {}
+
+}  // namespace app
+
+namespace {
+
+// the game: a folder with default.xbe beside its files, <files>/game by default, or a path in <files>/game_path.txt
+std::string FindGameFolder() {
+    fs::path files = app::ExeDir();
+    std::ifstream f(files / "game_path.txt");
+    std::string path;
+    if (f && std::getline(f, path) && !path.empty()) return path;
+    return (files / "game").string();
+}
+
+bool OpenWindow() {
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "0");
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
+        LOGE("android: SDL_Init failed: %s", SDL_GetError());
+        return false;
+    }
+    // SDL_WINDOW_VULKAN keeps SDL from making a GL context; the backend makes its own surface from the native window
+    app::g_window = SDL_CreateWindow("Ratatouille", 0, 0, SDL_WINDOW_FULLSCREEN | SDL_WINDOW_VULKAN);
+    if (!app::g_window) {
+        LOGE("android: SDL_CreateWindow failed: %s", SDL_GetError());
+        return false;
+    }
+    int w = 0, h = 0;
+    SDL_GetWindowSizeInPixels(app::g_window, &w, &h);
+    if (w > 0 && h > 0) {
+        app::g_width = uint32_t(w);
+        app::g_height = uint32_t(h);
+    }
+    SDL_PropertiesID props = SDL_GetWindowProperties(app::g_window);
+    auto* native = static_cast<ANativeWindow*>(
+        SDL_GetPointerProperty(props, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr));
+    if (!native) {
+        LOGE("android: the window has no native surface");
+        return false;
+    }
+    gpu::SetAndroidWindow(native);
+    LOGI("android: window %dx%d", w, h);
+    return true;
+}
+
+}  // namespace
+
+int main(int, char**) {
+    logx::Init((app::ExeDir() / "logs").string(), app::kGame.log);
+    LOGI("android: files %s", app::ExeDir().string().c_str());
+    app::Load();
+    if (app::kGame.init) app::kGame.init();
+    if (!OpenWindow()) return 1;
+    // <files>/display.txt: "fit" keeps the picture 16:9 with bars; anything else (or no file) fills the screen
+    {
+        std::ifstream df(app::ExeDir() / "display.txt");
+        std::string mode;
+        df >> mode;
+        gpu::SetDisplayFill(mode != "fit");
+        LOGI("android: display mode %s", mode == "fit" ? "fit" : "fill");
+    }
+    input::Init();
+    if (app::kGame.window) app::kGame.window(app::g_window);
+
+    std::string game = FindGameFolder();
+    std::ifstream f(fs::path(game) / IMAGE_XBE, std::ios::binary);
+    std::vector<uint8_t> xbe((std::istreambuf_iterator<char>(f)), {});
+    if (xbe.empty()) {
+        LOGE("android: no %s in %s; copy the game's extracted files there (adb push) and start again", IMAGE_XBE,
+             game.c_str());
+        logx::Flush();
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        return 1;
+    }
+    LOGI("android: game %s, %zu byte xbe", game.c_str(), xbe.size());
+    if (!kernel::Boot(std::move(xbe), IMAGE_XBE, game, (app::ExeDir() / "hdd").string())) {
+        logx::Flush();
+        return 1;
+    }
+    // the guest runs on its own threads; this one keeps the window's events moving
+    for (;;) {
+        SDL_PumpEvents();
+        std::this_thread::sleep_for(std::chrono::milliseconds(4));
+        logx::Flush();
+    }
+}
+
+
+// the on-screen controls (TouchControls.java) hand their pad state over from the UI thread: the button bits as the
+// console controller reports them, A B X Y black white left and right trigger (0-255), then both sticks (-32768..32767)
+extern "C" JNIEXPORT void JNICALL Java_io_github_ratatouille_TouchControls_nativeSetPad(
+    JNIEnv*, jclass, jint buttons, jint a, jint b, jint x, jint y, jint black, jint white, jint lt, jint rt, jint lx,
+    jint ly, jint rx, jint ry) {
+    input::Pad pad;
+    pad.connected = true;
+    pad.buttons = uint16_t(buttons);
+    const int analog[8] = {a, b, x, y, black, white, lt, rt};
+    for (int i = 0; i < 8; i++) pad.analog[i] = uint8_t(analog[i]);
+    pad.lx = int16_t(lx);
+    pad.ly = int16_t(ly);
+    pad.rx = int16_t(rx);
+    pad.ry = int16_t(ry);
+    input::SetTouchPad(pad);
+}
+
+// the settings panel's resolution slider (GameActivity.java), a percent of the screen's own pixels
+extern "C" JNIEXPORT void JNICALL Java_io_github_ratatouille_GameActivity_nativeSetResolution(JNIEnv*, jclass,
+                                                                                              jint percent) {
+    gpu::SetResolutionPercent(uint32_t(std::max(percent, 10)));
+}

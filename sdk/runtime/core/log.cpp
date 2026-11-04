@@ -10,6 +10,10 @@
 #include <thread>
 #include <vector>
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace logx {
@@ -73,6 +77,10 @@ void Write(Level lv, const char* fmt, ...) {
         std::fwrite(line, 1, size_t(n), g_file);
         if (lv >= Level::Warn) std::fflush(g_file);
     }
+#ifdef __ANDROID__
+    __android_log_write(lv >= Level::Error ? ANDROID_LOG_ERROR : lv == Level::Warn ? ANDROID_LOG_WARN : ANDROID_LOG_INFO,
+                        "ratatouille", line);
+#endif
     std::fwrite(line, 1, size_t(n), stderr);
 }
 
