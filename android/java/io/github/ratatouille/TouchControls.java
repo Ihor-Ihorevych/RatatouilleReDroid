@@ -2,7 +2,11 @@ package io.github.ratatouille;
 
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
+import android.view.ViewGroup;
+import android.widget.Button;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
@@ -381,6 +385,20 @@ public class TouchControls extends View implements InputManager.InputDeviceListe
         hint.setTextSize(13);
         hint.setText("100% is the screen's own pixels. A lower resolution is faster and a little softer.");
         box.addView(hint);
+        final Button telegram = new Button(ctx);
+        telegram.setText("Telegram group");
+        telegram.setOnClickListener(v -> {
+            try {
+                ctx.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/flipendodroid"))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (RuntimeException e) {
+                // no app can open a link: nothing to do
+            }
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                                                                     ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = pad;
+        box.addView(telegram, lp);
 
         bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
