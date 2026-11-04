@@ -10,6 +10,14 @@ namespace gpu {
 void SetAndroidWindow(ANativeWindow* window);
 ANativeWindow* GetAndroidWindow();
 
+// asks the app for the window as it is now: the activity makes a new one each time it comes back from the background, and the
+// backend remakes its surface and swapchain from it when the old one is lost
+void SetAndroidWindowProvider(ANativeWindow* (*provider)());
+
+// asks the app for the window as it is now: the activity makes a new one each time it comes back from the background, and the
+// backend remakes its surface and swapchain from it when the old one is lost
+void SetAndroidWindowProvider(ANativeWindow* (*provider)());
+
 // true: the picture fills a wide screen (16:9 up to about 21:9, stretched sideways as far as the screen needs); false: it
 // stays 16:9 with bars at the sides
 void SetDisplayFill(bool fill);

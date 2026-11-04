@@ -20,5 +20,4 @@ Needs the Android SDK (platform 35, NDK 28.2.13676358, CMake 4.1.2) and a JDK; `
 
 ## Settings
 
-The top-left button opens the resolution slider. `files/display.txt` containing `fit` keeps the picture 16:9 with side bars
-instead of filling the screen.
+The top-left button opens the settings: resolution (25% to 100% of the screen's pixels), picture shape (fill the screen, or 16:9 with side bars; applies on the next start), button opacity, visibility and style (game icons or Xbox A/B/X/Y), and links to the Telegram group and the source. Choices are saved in the app's preferences.

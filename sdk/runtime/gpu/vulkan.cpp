@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -34,6 +35,7 @@ namespace gpu {
 namespace {
 
 ANativeWindow* g_window = nullptr;
+ANativeWindow* (*g_window_provider)() = nullptr;
 bool g_fill = true;                   // the picture grows with a wide screen (see Present), else it stays 16:9
 constexpr float kMaxFillAspect = 2.4f;  // 21:9 phones are 2.33
 std::atomic<uint32_t> g_resolution_percent{100};  // of the screen's own pixels, set from the settings
@@ -511,6 +513,8 @@ private:
     bool CreateInstance();
     bool CreateDevice();
     bool CreateSwapchain();
+    bool RecreateSurface();
+    int acquire_timeouts_ = 0;
     bool CreateFrames();
     bool CreatePipelineLayout();
     bool CreateDummies();
@@ -787,6 +791,33 @@ bool VulkanBackend::CreateSwapchain() {
         VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         vkCreateSemaphore(dev_, &si, nullptr, &s);
     }
+    return true;
+}
+
+// A new window after the old one was destroyed (the app was hidden): drops the swapchain and surface, takes the app's
+// current window and builds both again. Leaves swap_ null when it is not there yet; Present tries again next frame.
+bool VulkanBackend::RecreateSurface() {
+    ANativeWindow* window = g_window_provider ? g_window_provider() : nullptr;
+    LOGI("vulkan: surface lost, window %p (was %p)", (void*)window, (void*)g_window);
+    if (!window) return false;
+    vkDeviceWaitIdle(dev_);
+    for (VkSemaphore s : swap_done_) vkDestroySemaphore(dev_, s, nullptr);
+    swap_done_.clear();
+    if (swap_) vkDestroySwapchainKHR(dev_, swap_, nullptr);
+    swap_ = VK_NULL_HANDLE;
+    if (surface_) vkDestroySurfaceKHR(instance_, surface_, nullptr);
+    surface_ = VK_NULL_HANDLE;
+    acquire_timeouts_ = 0;
+    LOGI("vulkan: old surface gone, making one");
+    g_window = window;
+    VkAndroidSurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
+    sci.window = window;
+    if (vkCreateAndroidSurfaceKHR(instance_, &sci, nullptr, &surface_) != VK_SUCCESS) {
+        surface_ = VK_NULL_HANDLE;
+        return false;
+    }
+    if (!CreateSwapchain()) return false;
+    LOGI("vulkan: surface made again, %ux%u", swap_extent_.width, swap_extent_.height);
     return true;
 }
 
@@ -2033,10 +2064,22 @@ void VulkanBackend::Present(const Surface& front) {
     VkTarget* t = EnsureTarget(front, false);
     EndRendering();
     uint32_t img = 0;
-    VkResult r;
-    {
+    VkResult r = VK_ERROR_SURFACE_LOST_KHR;
+    if (swap_) {
         PerfTimer t(perf_.wait_ms);  // the swapchain hands an image out at the display's pace
-        r = vkAcquireNextImageKHR(dev_, swap_, UINT64_MAX, Current().acquired, VK_NULL_HANDLE, &img);
+        r = vkAcquireNextImageKHR(dev_, swap_, 100000000ull, Current().acquired, VK_NULL_HANDLE, &img);  // 100 ms, never forever: a hidden app gets no images
+        acquire_timeouts_ = (r == VK_TIMEOUT || r == VK_NOT_READY) ? acquire_timeouts_ + 1 : 0;
+        if (acquire_timeouts_ >= 2) r = VK_ERROR_SURFACE_LOST_KHR;  // two in a row: the window is gone or covered
+    }
+    if (r == VK_ERROR_SURFACE_LOST_KHR) {
+        // the app went to the background and the window with it: the frame is skipped (at a calm pace, the game is not
+        // visible) until the activity has a new window, then the surface and swapchain are made again from it
+        Submit(true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        RecreateSurface();
+        Begin();
+        presents_++;
+        return;
     }
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) {
         // the window changed size: the frame is skipped and the swapchain remade for the next one
@@ -2117,6 +2160,7 @@ bool g_vulkan_reversed_depth = (g_reversed_depth = true);
 std::unique_ptr<Backend> CreateBackend() { return std::make_unique<VulkanBackend>(); }
 
 void SetAndroidWindow(ANativeWindow* window) { g_window = window; }
+void SetAndroidWindowProvider(ANativeWindow* (*provider)()) { g_window_provider = provider; }
 void SetDisplayFill(bool fill) { g_fill = fill; }
 void SetResolutionPercent(uint32_t percent) { g_resolution_percent = std::clamp(percent, 10u, 200u); }
 float DisplayAspect(uint32_t width, uint32_t height) {

@@ -73,6 +73,10 @@ void Pace() {}
 
 }  // namespace app
 
+namespace audio {
+void SetPaused(bool paused);  // audio_aaudio.cpp
+}
+
 namespace {
 
 // the game: a folder with default.xbe beside its files, <files>/game by default, or a path in <files>/game_path.txt
@@ -87,6 +91,16 @@ std::string FindGameFolder() {
 bool OpenWindow() {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "0");
+    // the main thread keeps flushing the log and the game keeps its place while the app is in the background
+    SDL_SetHint(SDL_HINT_ANDROID_BLOCK_ON_PAUSE, "0");
+    // ... so the sound is stopped here, and started again when the app comes back (a watch sees the events without taking them)
+    SDL_AddEventWatch(
+        [](void*, SDL_Event* e) -> bool {
+            if (e->type == SDL_EVENT_DID_ENTER_BACKGROUND) audio::SetPaused(true);
+            if (e->type == SDL_EVENT_WILL_ENTER_FOREGROUND) audio::SetPaused(false);
+            return true;
+        },
+        nullptr);
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         LOGE("android: SDL_Init failed: %s", SDL_GetError());
         return false;
@@ -111,6 +125,11 @@ bool OpenWindow() {
         return false;
     }
     gpu::SetAndroidWindow(native);
+    // SDL updates this property each time the activity gets a new window back from the background
+    gpu::SetAndroidWindowProvider([]() -> ANativeWindow* {
+        return static_cast<ANativeWindow*>(SDL_GetPointerProperty(SDL_GetWindowProperties(app::g_window),
+                                                                  SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr));
+    });
     LOGI("android: window %dx%d", w, h);
     return true;
 }
@@ -123,14 +142,7 @@ int main(int, char**) {
     app::Load();
     if (app::kGame.init) app::kGame.init();
     if (!OpenWindow()) return 1;
-    // <files>/display.txt: "fit" keeps the picture 16:9 with bars; anything else (or no file) fills the screen
-    {
-        std::ifstream df(app::ExeDir() / "display.txt");
-        std::string mode;
-        df >> mode;
-        gpu::SetDisplayFill(mode != "fit");
-        LOGI("android: display mode %s", mode == "fit" ? "fit" : "fill");
-    }
+    // the picture's shape (fill or fit) comes from the settings panel's saved choice: GameActivity sets it before this runs
     input::Init();
     if (app::kGame.window) app::kGame.window(app::g_window);
 
@@ -179,4 +191,17 @@ extern "C" JNIEXPORT void JNICALL Java_io_github_ratatouille_TouchControls_nativ
 extern "C" JNIEXPORT void JNICALL Java_io_github_ratatouille_GameActivity_nativeSetResolution(JNIEnv*, jclass,
                                                                                               jint percent) {
     gpu::SetResolutionPercent(uint32_t(std::max(percent, 10)));
+}
+
+// the settings panel's Screen choice (GameActivity.java): fill the screen, or 16:9 with bars; read when the game starts
+extern "C" JNIEXPORT void JNICALL Java_io_github_ratatouille_GameActivity_nativeSetFill(JNIEnv*, jclass, jboolean fill) {
+    gpu::SetDisplayFill(fill != JNI_FALSE);
+    LOGI("android: display mode %s", fill ? "fill" : "fit");
+}
+
+// the activity is paused or resumed (GameActivity.java): the sound goes with it
+extern "C" JNIEXPORT void JNICALL Java_io_github_ratatouille_GameActivity_nativeSetBackground(JNIEnv*, jclass,
+                                                                                             jboolean background) {
+    LOGI("android: %s", background ? "in the background" : "in front");
+    audio::SetPaused(background != JNI_FALSE);
 }

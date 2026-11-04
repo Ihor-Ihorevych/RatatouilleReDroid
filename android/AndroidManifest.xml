@@ -5,6 +5,14 @@
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x403000" android:required="true"/>
     <uses-feature android:name="android.hardware.touchscreen" android:required="false"/>
     <uses-feature android:name="android.hardware.gamepad" android:required="false"/>
+    <!-- the settings panel opens links (Telegram, GitHub): Android 11 and later only lets an app see who can open them if it asks -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <category android:name="android.intent.category.BROWSABLE"/>
+            <data android:scheme="https"/>
+        </intent>
+    </queries>
     <application android:label="Ratatouille" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher"
         android:isGame="true" android:hasCode="true"
         android:extractNativeLibs="true" android:allowBackup="false" android:debuggable="true">

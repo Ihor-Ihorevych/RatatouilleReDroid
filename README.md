@@ -22,8 +22,8 @@ There are no release builds: an APK contains code translated from the game, so e
 ## Android
 
 - **Renderer:** Vulkan 1.3 (`sdk/runtime/gpu/vulkan.cpp`). The game's shaders are the same HLSL the Direct3D 12 renderer uses, compiled to SPIR-V at run time with glslang. A Vulkan 1.3 GPU is required.
-- **Resolution and screen shape:** drawn at the screen's own pixels, with a slider (25% to 100%) behind the top-left Settings button. The picture is real widescreen: the game is told the screen's aspect ratio (16:9 up to about 21:9), so the 3D view is wider rather than stretched. Menus and 2D art still stretch sideways. A `display.txt` in the app's files folder containing `fit` keeps 16:9 with side bars.
-- **Controls:** on-screen buttons, one per action the game binds (Jump, Action for attack and use, HUD, Sprint, Sniff, Select, Start, camera reset), with icons drawn from SVG paths. There are no sticks until you touch: the left half of the screen moves, the right half turns the camera. A physical gamepad hides the overlay.
+- **Resolution and screen shape:** drawn at the screen's own pixels, with a slider (25% to 100%) behind the top-left Settings button. The picture is real widescreen: the game is told the screen's aspect ratio (16:9 up to about 21:9), so the 3D view is wider rather than stretched. Menus and 2D art still stretch sideways. Settings also has the picture shape (fill the screen, or 16:9 with side bars; applies on the next start), the opacity of the on-screen buttons, and links to the Telegram group and the source.
+- **Controls:** on-screen buttons, one per action the game binds (Jump, Fight for attack and drop (B), Use for use, move and the oars (X), HUD, Sprint, Sniff, Select, Start, camera reset), with icons drawn from SVG paths. There are no sticks until you touch: the left half of the screen moves, the right half turns the camera. A physical gamepad hides the overlay.
 - **Sound:** AAudio.
 
 ### Build (Windows, Git Bash)
